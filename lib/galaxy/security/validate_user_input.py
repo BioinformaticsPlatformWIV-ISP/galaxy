@@ -63,24 +63,21 @@ def validate_publicname(trans, publicname, user=None):
     return ''
 
 
-def transform_publicname(trans, publicname, user=None):
+def transform_publicname(publicname):
     # User names must be at least four characters in length and contain only lower-case
     # letters, numbers, and the '-' character.
     # TODO: Enhance to allow generation of semi-random publicnnames e.g., when valid but taken
-    if user and user.username == publicname:
-        return publicname
-    elif publicname not in ['None', None, '']:
+    if publicname not in ['None', None, '']:
         publicname = publicname.lower()
         publicname = re.sub(VALID_PUBLICNAME_SUB, FILL_CHAR, publicname)
         publicname = publicname.ljust(PUBLICNAME_MIN_LEN + 1, FILL_CHAR)[:PUBLICNAME_MAX_LEN]
-        if not trans.sa_session.query(trans.app.model.User).filter_by(username=publicname).first():
-            return publicname
-    return ''
+
+    return publicname
 
 
 def validate_password(trans, password, confirm):
     if len(password) < PASSWORD_MIN_LEN:
         return "Use a password of at least %d characters." % PASSWORD_MIN_LEN
-    elif password != confirm:
+    if password != confirm:
         return "Passwords do not match."
     return ""
