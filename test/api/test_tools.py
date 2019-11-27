@@ -4,6 +4,7 @@ import json
 import os
 import tarfile
 
+import pytest
 from base import api
 from base import rules_test_data
 from base.populators import (
@@ -53,10 +54,25 @@ class ToolsTestCase(api.ApiTestCase):
         assert "upload1" in tool_ids
 
     @skip_without_tool("cat1")
-    def test_search(self):
-        url = self._api_url("tools?q=cat")
-        get_response = get(url).json()
+    def test_search_cat(self):
+        url = self._api_url("tools")
+        payload = dict(q="concat")
+        get_response = get(url, payload).json()
         assert "cat1" in get_response
+
+    @skip_without_tool("trimmer")
+    def test_search_trimmer(self):
+        url = self._api_url("tools")
+        payload = dict(q="leading or trailing characters")
+        get_response = get(url, payload).json()
+        assert "trimmer" in get_response
+
+    @skip_without_tool("Grep1")
+    def test_search_grep(self):
+        url = self._api_url("tools")
+        payload = dict(q="Select lines that match an expression")
+        get_response = get(url, payload).json()
+        assert "Grep1" in get_response
 
     def test_no_panel_index(self):
         index = self._get("tools", data=dict(in_panel=False))
@@ -1949,6 +1965,44 @@ class ToolsTestCase(api.ApiTestCase):
             self.assertEqual(len(implicit_collections), 2)
             output_hdca = self.dataset_populator.get_history_collection_details(history_id, hid=implicit_collections[0]["hid"])
             assert output_hdca["collection_type"] == "list"
+
+    @skip_without_tool("column_multi_param")
+    def test_implicit_conversion_and_reduce(self):
+        with self.dataset_populator.test_history() as history_id:
+            self._run_implicit_collection_and_reduce(history_id=history_id, param="1")
+
+    @skip_without_tool("column_multi_param")
+    def test_implicit_conversion_and_reduce_invalid_param(self):
+        with self.dataset_populator.test_history() as history_id:
+            with pytest.raises(AssertionError):
+                self._run_implicit_collection_and_reduce(history_id=history_id, param="X")
+        details = self.dataset_populator.get_history_dataset_details(history_id=history_id, hid=3, assert_ok=False)
+        assert details['state'] == "error"
+        assert "parameter 'col': an invalid option" in details['misc_info']
+
+    def _run_implicit_collection_and_reduce(self, history_id, param):
+        fasta_path = self.test_data_resolver.get_filename("1.fasta")
+        with open(fasta_path, "r") as fasta_fh:
+            fasta_content = fasta_fh.read()
+            response = self.dataset_collection_populator.upload_collection(history_id, "list", elements=[
+                {
+                    "name": "test0",
+                    "src": "pasted",
+                    "paste_content": fasta_content,
+                    "ext": "fasta",
+                }
+            ])
+            self._assert_status_code_is(response, 200)
+            hdca_id = response.json()["outputs"][0]["id"]
+            inputs = {
+                "input1": {'src': 'hdca', 'id': hdca_id},
+                "col": param,
+            }
+            create = self._run("column_multi_param", history_id, inputs, assert_ok=True)
+            jobs = create['jobs']
+            self.assertEqual(len(jobs), 1)
+            content = self.dataset_populator.get_history_dataset_content(history_id, hid=3)
+            assert content.strip() == 'hg17', content
 
     @skip_without_tool("multi_data_repeat")
     def test_reduce_collections_in_repeat(self):

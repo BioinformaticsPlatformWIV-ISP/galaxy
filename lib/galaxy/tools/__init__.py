@@ -10,6 +10,11 @@ import tempfile
 import threading
 from collections import OrderedDict
 from datetime import datetime
+try:
+    from pathlib import Path
+except ImportError:
+    # Use backport on python 2
+    from pathlib2 import Path
 from xml.etree import ElementTree
 
 import packaging.version
@@ -38,6 +43,7 @@ from galaxy.tool_util.loader import (
     raw_tool_xml_tree,
     template_macro_params
 )
+from galaxy.tool_util.output_checker import DETECTED_JOB_STATE
 from galaxy.tool_util.parser import (
     get_tool_source,
     get_tool_source_from_representation,
@@ -63,6 +69,7 @@ from galaxy.tools.parameters.basic import (
     DataCollectionToolParameter,
     DataToolParameter,
     HiddenToolParameter,
+    ImplicitConversionRequired,
     SelectToolParameter,
     ToolParameter,
     workflow_building_modes,
@@ -324,7 +331,7 @@ class ToolBox(BaseGalaxyToolBox):
         }
 
     def _get_tool_shed_repository(self, tool_shed, name, owner, installed_changeset_revision):
-        # Abstract toolbox doesn't have a dependency on the the database, so
+        # Abstract toolbox doesn't have a dependency on the database, so
         # override _get_tool_shed_repository here to provide this information.
 
         return repository_util.get_installed_repository(
@@ -332,7 +339,8 @@ class ToolBox(BaseGalaxyToolBox):
             tool_shed=tool_shed,
             name=name,
             owner=owner,
-            installed_changeset_revision=installed_changeset_revision
+            installed_changeset_revision=installed_changeset_revision,
+            from_cache=True,
         )
 
     def __build_tool_version_select_field(self, tools, tool_id, set_selected):
@@ -511,6 +519,11 @@ class Tool(Dictifiable):
             return []
 
     @property
+    def is_latest_version(self):
+        tool_versions = self.tool_versions
+        return not tool_versions or self.version == self.tool_versions[-1]
+
+    @property
     def tool_shed_repository(self):
         # If this tool is included in an installed tool shed repository, return it.
         if self.tool_shed:
@@ -519,7 +532,7 @@ class Tool(Dictifiable):
                                                             name=self.repository_name,
                                                             owner=self.repository_owner,
                                                             installed_changeset_revision=self.installed_changeset_revision,
-                                                            repository_id=self.repository_id)
+                                                            from_cache=True)
 
     @property
     def produces_collections_with_unknown_structure(self):
@@ -915,21 +928,19 @@ class Tool(Dictifiable):
     @property
     def _repository_dir(self):
         """If tool shed installed tool, the base directory of the repository installed."""
-        repository_dir = None
+        repository_base_dir = None
 
         if getattr(self, 'tool_shed', None):
-            repository_dir = self.tool_dir
-            while True:
-                repository_dir_name = os.path.basename(repository_dir)
-                if repository_dir_name == self.repository_name:
-                    break
+            tool_dir = Path(self.tool_dir)
+            if tool_dir.parts[-1] == self.repository_name:
+                return str(tool_dir)
+            for parent in tool_dir.parents:
+                if parent.parts[-1] == self.repository_name:
+                    return str(parent)
+            else:
+                log.error("Problem finding repository dir for tool [%s]" % self.id)
 
-                parent_repository_dir = os.path.dirname(repository_dir)
-                if repository_dir == parent_repository_dir:
-                    log.error("Problem finding repository dir for tool [%s]" % self.id)
-                    repository_dir = None
-
-        return repository_dir
+        return repository_base_dir
 
     def test_data_path(self, filename):
         repository_dir = self._repository_dir
@@ -1745,7 +1756,7 @@ class Tool(Dictifiable):
     def exec_before_job(self, app, inp_data, out_data, param_dict={}):
         pass
 
-    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None):
+    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None, **kwds):
         pass
 
     def job_failed(self, job_wrapper, message, exception=False):
@@ -2066,10 +2077,13 @@ class Tool(Dictifiable):
                     tool_dict['value'] = input.value_to_basic(state_inputs.get(input.name, initial_value), self.app, use_security=True)
                     tool_dict['default_value'] = input.value_to_basic(initial_value, self.app, use_security=True)
                     tool_dict['text_value'] = input.value_to_display_text(tool_dict['value'])
+                except ImplicitConversionRequired:
+                    tool_dict = input.to_dict(request_context)
+                    # This hack leads client to display a text field
+                    tool_dict['textable'] = True
                 except Exception:
                     tool_dict = input.to_dict(request_context)
                     log.exception("tools::to_json() - Skipping parameter expansion '%s'", input.name)
-                    pass
             if input_index >= len(group_inputs):
                 group_inputs.append(tool_dict)
             else:
@@ -2172,7 +2186,7 @@ class Tool(Dictifiable):
                         message += 'You can re-run the job with the selected <a href=\"%s\" target=\"_blank\">tool id \"%s\"</a> or choose another derivation of the tool. ' % (new_tool_shed_url, self.id)
                     else:
                         message += 'You can re-run the job with <a href=\"%s\" target=\"_blank\">tool id \"%s\"</a>, which is a derivation of the original tool. ' % (new_tool_shed_url, self.id)
-            if len(self.tool_versions) > 1 and tool_version != self.tool_versions[-1]:
+            if not self.is_latest_version:
                 message += 'There is a newer version of this tool available.'
         except Exception as e:
             raise exceptions.MessageException(unicodify(e))
@@ -2413,7 +2427,7 @@ class SetMetadataTool(Tool):
                 history.id, job.user, incoming={'input1': hda}, overwrite=False
             )
 
-    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None):
+    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None, **kwds):
         working_directory = app.object_store.get_filename(
             job, base_dir='job_work', dir_only=True, obj_dir=True
         )
@@ -2497,17 +2511,13 @@ class DataManagerTool(OutputParameterJSONTool):
         if self.data_manager_id is None:
             self.data_manager_id = self.id
 
-    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None, **kwds):
+    def exec_after_process(self, app, inp_data, out_data, param_dict, job=None, final_job_state=None, **kwds):
         assert self.allow_user_access(job.user), "You must be an admin to access this tool."
+        if final_job_state != DETECTED_JOB_STATE.OK:
+            return
         # run original exec_after_process
         super(DataManagerTool, self).exec_after_process(app, inp_data, out_data, param_dict, job=job, **kwds)
         # process results of tool
-        if job and job.state == job.states.ERROR:
-            return
-        # Job state may now be 'running' instead of previous 'error', but datasets are still set to e.g. error
-        for dataset in out_data.values():
-            if dataset.state != dataset.states.OK:
-                return
         data_manager_id = job.data_manager_association.data_manager_id
         data_manager = self.app.data_managers.get_manager(data_manager_id, None)
         assert data_manager is not None, "Invalid data manager (%s) requested. It may have been removed before the job completed." % (data_manager_id)

@@ -112,6 +112,7 @@ class BaseAppConfiguration(object):
         self.global_conf_parser = configparser.ConfigParser()
         if not self.config_file and self.global_conf and "__file__" in self.global_conf:
             self.config_file = self.global_conf['__file__']
+
         if self.config_file is None:
             log.warning("No Galaxy config file found, running from current working directory: %s", os.getcwd())
         else:
@@ -122,12 +123,16 @@ class BaseAppConfiguration(object):
             except Exception:
                 # Not an INI file
                 pass
-        self.config_dir = config_kwargs.get('config_dir', os.path.dirname(self.config_file or os.getcwd()))
-        self.data_dir = config_kwargs.get('data_dir', None)
+
+        _config_dir = os.path.dirname(self.config_file) if self.config_file else os.getcwd()
+        self.config_dir = config_kwargs.get('config_dir', _config_dir)
+
+        self.data_dir = config_kwargs.get('data_dir')
         # mutable_config_dir is intentionally not configurable. You can
         # override individual mutable configs with config options, but they
         # should be considered Galaxy-controlled data files and will by default
         # just live in the data dir
+
         if running_from_source:
             if self.data_dir is None:
                 self.data_dir = os.path.join(self.root, 'database')
@@ -141,6 +146,7 @@ class BaseAppConfiguration(object):
                 self.data_dir = os.path.join(self.config_dir, 'data')
             self.mutable_config_dir = os.path.join(self.data_dir, 'config')
             self.shed_tools_dir = os.path.join(self.data_dir, 'shed_tools')
+
         log.debug("Configuration directory is %s", self.config_dir)
         log.debug("Data directory is %s", self.data_dir)
         log.debug("Mutable config directory is %s", self.mutable_config_dir)
@@ -835,8 +841,8 @@ class GalaxyAppConfiguration(BaseAppConfiguration):
             migrated_tools_config=[self._in_config_dir('migrated_tools_conf.xml')],
             modules_mapping_files=[self._in_config_dir('environment_modules_mapping.yml')],
             object_store_config_file=[self._in_config_dir('object_store_conf.xml')],
-            oidc_backends_config_file=[self._in_config_dir('oidc_backends_config.yml')],
-            oidc_config_file=[self._in_config_dir('oidc_config.yml')],
+            oidc_backends_config_file=[self._in_config_dir('oidc_backends_config.xml')],
+            oidc_config_file=[self._in_config_dir('oidc_config.xml')],
             shed_data_manager_config_file=[self._in_mutable_config_dir('shed_data_manager_conf.xml')],
             shed_tool_config_file=[self._in_mutable_config_dir('shed_tool_conf.xml')],
             shed_tool_data_table_config=[self._in_mutable_config_dir('shed_tool_data_table_conf.xml')],
@@ -844,7 +850,7 @@ class GalaxyAppConfiguration(BaseAppConfiguration):
             tool_sheds_config_file=[self._in_config_dir('tool_sheds_conf.xml')],
             user_preferences_extra_conf_path=[self._in_config_dir('user_preferences_extra_conf.yml')],
             workflow_resource_params_file=[self._in_config_dir('workflow_resource_params_conf.xml')],
-            workflow_schedulers_config_file=[self._in_config_dir('config/workflow_schedulers_conf.xml')],
+            workflow_schedulers_config_file=[self._in_config_dir('workflow_schedulers_conf.xml')],
         )
         listify_defaults = {
             'tool_data_table_config_path': [
@@ -1091,28 +1097,27 @@ class ConfiguresGalaxyMixin(object):
         from galaxy.managers.tools import DynamicToolManager
         self.dynamic_tools_manager = DynamicToolManager(self)
         self._toolbox_lock = threading.RLock()
-        # Initialize the tools, making sure the list of tool configs includes automatically generated dynamic
-        # (shed-enabled) tool configs, which are created on demand.
-        tool_configs = self.config.tool_configs
-        # If the user has configured a shed tool config in tool_config_file this would add a second, but since we're not
-        # parsing them yet we don't know if that's the case. We'll assume that the standard shed_tool_conf.xml location
-        # is in use, and warn if we suspect there to be problems.
-        if self.config.shed_tool_config_file not in tool_configs:
-            # This seems like the likely case for problems in older deployments
-            if self.config.tool_config_file_set and not self.config.shed_tool_config_file_set:
-                log.warning(
-                    "The default shed tool config file (%s) has been added to the tool_config_file option, if this is "
-                    "not the desired behavior, please set shed_tool_config_file to your primary shed-enabled tool "
-                    "config file"
-                )
-            tool_configs.append(self.config.shed_tool_config_file)
+        # shed_tool_config_file has been set, add it to tool_configs
+        if self.config.shed_tool_config_file_set:
+            self.config.tool_configs.append(self.config.shed_tool_config_file)
         # The value of migrated_tools_config is the file reserved for containing only those tools that have been
         # eliminated from the distribution and moved to the tool shed. If migration checking is disabled, only add it if
         # it exists (since this may be an existing deployment where migrations were previously run).
         if ((self.config.check_migrate_tools or os.path.exists(self.config.migrated_tools_config))
-                and self.config.migrated_tools_config not in tool_configs):
-            tool_configs.append(self.config.migrated_tools_config)
-        self.toolbox = tools.ToolBox(tool_configs, self.config.tool_path, self)
+                and self.config.migrated_tools_config not in self.config.tool_configs):
+            self.config.tool_configs.append(self.config.migrated_tools_config)
+        self.toolbox = tools.ToolBox(self.config.tool_configs, self.config.tool_path, self)
+        # If no shed-enabled tool config file has been loaded, we append a default shed_tool_conf.xml
+        if not self.config.shed_tool_config_file_set and not self.toolbox.dynamic_confs():
+            # This seems like the likely case for problems in older deployments
+            if self.config.tool_config_file_set:
+                log.warning(
+                    "The default shed tool config file (%s) has been added to the tool_config_file option, if this is "
+                    "not the desired behavior, please set shed_tool_config_file to your primary shed-enabled tool "
+                    "config file", self.config.shed_tool_config_file
+                )
+            self.config.tool_configs.append(self.config.shed_tool_config_file)
+            self.toolbox._init_tools_from_config(self.config.shed_tool_config_file)
         galaxy_root_dir = os.path.abspath(self.config.root)
         file_path = os.path.abspath(getattr(self.config, "file_path"))
         app_info = AppInfo(
