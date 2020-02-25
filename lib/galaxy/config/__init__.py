@@ -838,7 +838,7 @@ class GalaxyAppConfiguration(BaseAppConfiguration):
             job_metrics_config_file=[self._in_config_dir('job_metrics_conf.xml'), self._in_sample_dir('job_metrics_conf.xml.sample')],
             job_resource_params_file=[self._in_config_dir('job_resource_params_conf.xml')],
             local_conda_mapping_file=[self._in_config_dir('local_conda_mapping.yml')],
-            migrated_tools_config=[self._in_config_dir('migrated_tools_conf.xml')],
+            migrated_tools_config=[self._in_mutable_config_dir('migrated_tools_conf.xml')],
             modules_mapping_files=[self._in_config_dir('environment_modules_mapping.yml')],
             object_store_config_file=[self._in_config_dir('object_store_conf.xml')],
             oidc_backends_config_file=[self._in_config_dir('oidc_backends_config.xml')],
@@ -1097,8 +1097,7 @@ class ConfiguresGalaxyMixin(object):
         from galaxy.managers.tools import DynamicToolManager
         self.dynamic_tools_manager = DynamicToolManager(self)
         self._toolbox_lock = threading.RLock()
-        # shed_tool_config_file has been set, add it to tool_configs
-        if self.config.shed_tool_config_file_set:
+        if self.config.shed_tool_config_file not in self.config.tool_configs:
             self.config.tool_configs.append(self.config.shed_tool_config_file)
         # The value of migrated_tools_config is the file reserved for containing only those tools that have been
         # eliminated from the distribution and moved to the tool shed. If migration checking is disabled, only add it if
@@ -1107,17 +1106,6 @@ class ConfiguresGalaxyMixin(object):
                 and self.config.migrated_tools_config not in self.config.tool_configs):
             self.config.tool_configs.append(self.config.migrated_tools_config)
         self.toolbox = tools.ToolBox(self.config.tool_configs, self.config.tool_path, self)
-        # If no shed-enabled tool config file has been loaded, we append a default shed_tool_conf.xml
-        if not self.config.shed_tool_config_file_set and not self.toolbox.dynamic_confs():
-            # This seems like the likely case for problems in older deployments
-            if self.config.tool_config_file_set:
-                log.warning(
-                    "The default shed tool config file (%s) has been added to the tool_config_file option, if this is "
-                    "not the desired behavior, please set shed_tool_config_file to your primary shed-enabled tool "
-                    "config file", self.config.shed_tool_config_file
-                )
-            self.config.tool_configs.append(self.config.shed_tool_config_file)
-            self.toolbox._init_tools_from_config(self.config.shed_tool_config_file)
         galaxy_root_dir = os.path.abspath(self.config.root)
         file_path = os.path.abspath(getattr(self.config, "file_path"))
         app_info = AppInfo(
